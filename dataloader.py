@@ -127,7 +127,7 @@ class DataLoadPreprocess(Dataset):
             image, depth_gt = self.random_crop(image, depth_gt, self.args.input_height, self.args.input_width)
             image, depth_gt = self.train_preprocess(image, depth_gt)
             sample = {'image': image, 'depth': depth_gt, 'focal': focal}
-
+            
         else:
             if self.mode == 'online_eval':
                 data_path = self.args.data_path_eval

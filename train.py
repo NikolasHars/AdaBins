@@ -72,6 +72,13 @@ def main_worker(gpu, ngpus_per_node, args):
 
     model = models.UnetAdaptiveBins.build(n_bins=args.n_bins, min_val=args.min_depth, max_val=args.max_depth,
                                           norm=args.norm)
+    epoch = 0
+    last_epoch = -1
+    if args.resume and args.pretrained_path is not None:
+        model, _, _ = model_io.load_checkpoint(args.pretrained_path, model)
+    elif args.resume and args.resume_path is not None:
+        model, optimizer, epoch = model_io.load_checkpoint(args.resume_path, model)
+        last_epoch = epoch
 
     ################################################################################################
 
@@ -102,10 +109,10 @@ def main_worker(gpu, ngpus_per_node, args):
         model = model.cuda()
         model = torch.nn.DataParallel(model)
 
-    args.epoch = 0
-    args.last_epoch = -1
+    args.epoch = epoch
+    args.last_epoch = last_epoch
     train(model, args, epochs=args.epochs, lr=args.lr, device=args.gpu, root=args.root,
-          experiment_name=args.name, optimizer_state_dict=None)
+          experiment_name=args.name, optimizer_state_dict=optimizer if (args.resume and args.resume_path) else None)
 
 
 def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root=".", device=None,
@@ -125,7 +132,10 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
         tags = args.tags.split(',') if args.tags != '' else None
         if args.dataset != 'nyu':
             PROJECT = PROJECT + f"-{args.dataset}"
-        wandb.init(project=PROJECT, name=name, config=args, dir=args.root, tags=tags, notes=args.notes)
+        if args.wandb:
+            wandb.init(project=PROJECT, name=name, config=args, dir=args.root, tags=tags, notes=args.notes)
+        else:
+            wandb.init(project=PROJECT, name=name, config=args, dir=args.root, tags=tags, notes=args.notes, mode='disabled')
         # wandb.watch(model)
     ################################################################################################
 
@@ -164,8 +174,7 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
                                               base_momentum=0.85, max_momentum=0.95, last_epoch=args.last_epoch,
                                               div_factor=args.div_factor,
                                               final_div_factor=args.final_div_factor)
-    if args.resume != '' and scheduler is not None:
-        scheduler.step(args.epoch + 1)
+
     ################################################################################################
 
     # max_iter = len(train_loader) * epochs
@@ -207,11 +216,11 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
 
             ########################################################################################################
 
-            if should_write and step % args.validate_every == 0:
+            if should_write and (step % args.validate_every == 0 or step == 1):
 
                 ################################# Validation loop ##################################################
                 model.eval()
-                metrics, val_si = validate(args, model, test_loader, criterion_ueff, epoch, epochs, device)
+                metrics, val_si = validate(args, model, test_loader, criterion_ueff, epoch, epochs, device, step=step)
 
                 # print("Validated: {}".format(metrics))
                 if should_log:
@@ -234,11 +243,12 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
     return model
 
 
-def validate(args, model, test_loader, criterion_ueff, epoch, epochs, device='cpu'):
+def validate(args, model, test_loader, criterion_ueff, epoch, epochs, device='cpu', step=0):
     with torch.no_grad():
         val_si = RunningAverage()
         # val_bins = RunningAverage()
         metrics = utils.RunningAverageDict()
+        i = 0
         for batch in tqdm(test_loader, desc=f"Epoch: {epoch + 1}/{epochs}. Loop: Validation") if is_rank_zero(
                 args) else test_loader:
             img = batch['image'].to(device)
@@ -262,6 +272,10 @@ def validate(args, model, test_loader, criterion_ueff, epoch, epochs, device='cp
             pred[np.isnan(pred)] = args.min_depth_eval
 
             gt_depth = depth.squeeze().cpu().numpy()
+
+            if (i == 0 or i == len(test_loader) - 1) and args.wandb:
+                log_images(img.squeeze().cpu().numpy().transpose((1, 2, 0)), gt_depth, pred, args, step=step)
+            i += 1
             valid_mask = np.logical_and(gt_depth > args.min_depth_eval, gt_depth < args.max_depth_eval)
             if args.garg_crop or args.eigen_crop:
                 gt_height, gt_width = gt_depth.shape
@@ -314,10 +328,12 @@ if __name__ == '__main__':
                         choices=['linear', 'softmax', 'sigmoid'])
     parser.add_argument("--same-lr", '--same_lr', default=False, action="store_true",
                         help="Use same LR for all param groups")
-    parser.add_argument("--distributed", default=True, action="store_true", help="Use DDP if set")
+    parser.add_argument("--distributed", action="store_true", help="Use DDP if set")
     parser.add_argument("--root", default=".", type=str,
                         help="Root folder to save data in")
-    parser.add_argument("--resume", default='', type=str, help="Resume from checkpoint")
+    parser.add_argument("--resume", action="store_true", help="Resume from checkpoint, default = None")
+    parser.add_argument("--pretrained_path", type=str, help="Path to pretrained model, default = None")
+    parser.add_argument("--resume_path", type=str, help="Path to checkpoint to resume from, default = None")
 
     parser.add_argument("--notes", default='', type=str, help="Wandb notes")
     parser.add_argument("--tags", default='sweep', type=str, help="Wandb tags")
@@ -346,6 +362,9 @@ if __name__ == '__main__':
     parser.add_argument('--do_kb_crop', help='if set, crop input images as kitti benchmark images', action='store_true')
     parser.add_argument('--use_right', help='if set, will randomly use right images when train on KITTI',
                         action='store_true')
+
+                    
+    parser.add_argument('--wandb', default=False, help='if set, will use wandb for logging', action='store_true')
 
     parser.add_argument('--data_path_eval',
                         default="../dataset/nyu/official_splits/test/",
