@@ -189,13 +189,16 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
 
             img = batch['image'].to(device)
             depth = batch['depth'].to(device)
+            mask = batch['mask'].to(device)
             if 'has_valid_depth' in batch:
                 if not batch['has_valid_depth']:
                     continue
 
             bin_edges, pred = model(img)
 
-            mask = depth > args.min_depth
+            mask_depth = depth > args.min_depth
+            mask = mask_depth * mask
+
             l_dense = criterion_ueff(pred, depth, mask=mask.to(torch.bool), interpolate=True)
 
             if args.w_chamfer > 0:

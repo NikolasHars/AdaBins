@@ -84,6 +84,11 @@ class DataLoadPreprocess(Dataset):
 
     def __getitem__(self, idx):
         sample_path = self.filenames[idx]
+        exists_mask = False
+        if len(sample_path.split()) == 4 and self.args.dataset == 'kitti':
+            exists_mask = True
+        
+
         focal = float(sample_path.split()[2])
 
         if self.mode == 'train':
@@ -93,9 +98,16 @@ class DataLoadPreprocess(Dataset):
             else:
                 image_path = os.path.join(self.args.data_path, remove_leading_slash(sample_path.split()[0]))
                 depth_path = os.path.join(self.args.gt_path, remove_leading_slash(sample_path.split()[1]))
+                mask_path = os.path.join(self.args.data_path, remove_leading_slash(sample_path.split()[3]))
 
             image = Image.open(image_path)
             depth_gt = Image.open(depth_path)
+            if exists_mask:
+                mask = Image.open(mask_path)
+            else:
+                mask = np.ones((image.height, image.width))
+                # make to PIL array
+                mask = Image.fromarray(mask)
 
             if self.args.do_kb_crop is True:
                 height = image.height
@@ -104,29 +116,34 @@ class DataLoadPreprocess(Dataset):
                 left_margin = int((width - 1216) / 2)
                 depth_gt = depth_gt.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
                 image = image.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
+                mask = mask.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
 
             # To avoid blank boundaries due to pixel registration
             if self.args.dataset == 'nyu':
                 depth_gt = depth_gt.crop((43, 45, 608, 472))
                 image = image.crop((43, 45, 608, 472))
+                mask = mask.crop((43, 45, 608, 472))
 
             if self.args.do_random_rotate is True:
                 random_angle = (random.random() - 0.5) * 2 * self.args.degree
                 image = self.rotate_image(image, random_angle)
                 depth_gt = self.rotate_image(depth_gt, random_angle, flag=Image.NEAREST)
+                mask = self.rotate_image(mask, random_angle, flag=Image.NEAREST)
 
             image = np.asarray(image, dtype=np.float32) / 255.0
             depth_gt = np.asarray(depth_gt, dtype=np.float32)
             depth_gt = np.expand_dims(depth_gt, axis=2)
+            mask = np.asarray(mask, dtype=np.float32)
+            mask = np.expand_dims(mask, axis=2)
 
             if self.args.dataset == 'nyu':
                 depth_gt = depth_gt / 1000.0
             else:
                 depth_gt = depth_gt / 256.0
 
-            image, depth_gt = self.random_crop(image, depth_gt, self.args.input_height, self.args.input_width)
-            image, depth_gt = self.train_preprocess(image, depth_gt)
-            sample = {'image': image, 'depth': depth_gt, 'focal': focal}
+            image, depth_gt, mask = self.random_crop(image, depth_gt, self.args.input_height, self.args.input_width, mask=mask)
+            image, depth_gt, mask = self.train_preprocess(image, depth_gt, mask)
+            sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'mask': mask}
             
         else:
             if self.mode == 'online_eval':
@@ -180,7 +197,7 @@ class DataLoadPreprocess(Dataset):
         result = image.rotate(angle, resample=flag)
         return result
 
-    def random_crop(self, img, depth, height, width):
+    def random_crop(self, img, depth, height, width, mask=None):
         assert img.shape[0] >= height
         assert img.shape[1] >= width
         assert img.shape[0] == depth.shape[0]
@@ -189,20 +206,27 @@ class DataLoadPreprocess(Dataset):
         y = random.randint(0, img.shape[0] - height)
         img = img[y:y + height, x:x + width, :]
         depth = depth[y:y + height, x:x + width, :]
+        if mask is not None:
+            mask = mask[y:y + height, x:x + width, :]
+            return img, depth, mask
         return img, depth
 
-    def train_preprocess(self, image, depth_gt):
+    def train_preprocess(self, image, depth_gt, mask=None):
         # Random flipping
         do_flip = random.random()
         if do_flip > 0.5:
             image = (image[:, ::-1, :]).copy()
             depth_gt = (depth_gt[:, ::-1, :]).copy()
+            if mask is not None:
+                mask = (mask[:, ::-1, :]).copy()
 
         # Random gamma, brightness, color augmentation
         do_augment = random.random()
         if do_augment > 0.5:
             image = self.augment_image(image)
 
+        if mask is not None:
+            return image, depth_gt, mask
         return image, depth_gt
 
     def augment_image(self, image):
