@@ -13,7 +13,6 @@ from dataloader import DepthDataLoader
 from models import UnetAdaptiveBins
 from utils import RunningAverageDict
 
-
 def compute_errors(gt, pred):
     thresh = np.maximum((gt / pred), (pred / gt))
     a1 = (thresh < 1.25).mean()
@@ -68,7 +67,7 @@ def eval(model, test_loader, args, gpus=None, ):
         device = gpus[0]
 
     if args.save_dir is not None:
-        os.makedirs(args.save_dir)
+        os.makedirs(args.save_dir, exist_ok=True)
 
     metrics = RunningAverageDict()
     # crop_size = (471 - 45, 601 - 41)
@@ -78,8 +77,7 @@ def eval(model, test_loader, args, gpus=None, ):
         model.eval()
 
         sequential = test_loader
-        for batch in tqdm(sequential):
-
+        for i, batch in tqdm(enumerate(sequential)):
             image = batch['image'].to(device)
             gt = batch['depth'].to(device)
             final = predict_tta(model, image, args)
@@ -94,11 +92,16 @@ def eval(model, test_loader, args, gpus=None, ):
                 if args.dataset == 'nyu':
                     impath = f"{batch['image_path'][0].replace('/', '__').replace('.jpg', '')}"
                     factor = 1000
-                else:
+                elif args.dataset == 'kitti':
                     dpath = batch['image_path'][0].split('/')
                     impath = dpath[1] + "_" + dpath[-1]
                     impath = impath.split('.')[0]
                     factor = 256
+                elif args.dataset == 'waymo' and i % 100 == 0:
+                    dpath = batch['image_path'][0].split('/')
+                    impath = dpath[-3] + "_" + dpath[-1]
+                    impath = impath.split('.')[0]
+                    factor = 255
 
                 # rgb_path = os.path.join(rgb_dir, f"{impath}.png")
                 # tf.ToPILImage()(denormalize(image.squeeze().unsqueeze(0).cpu()).squeeze()).save(rgb_path)
@@ -130,11 +133,17 @@ def eval(model, test_loader, args, gpus=None, ):
                         int(0.0359477 * gt_width):int(0.96405229 * gt_width)] = 1
                     else:
                         eval_mask[45:471, 41:601] = 1
-            valid_mask = np.logical_and(valid_mask, eval_mask)
+                valid_mask = np.logical_and(valid_mask, eval_mask)
             #             gt = gt[valid_mask]
             #             final = final[valid_mask]
 
             metrics.update(compute_errors(gt[valid_mask], final[valid_mask]))
+
+            if i % 5000 == 1:
+                print(f"Metrics update at step {i}:")
+                print(f"Total invalid so far: {total_invalid}")
+                interm_metrics = {k: round(v, 3) for k, v in metrics.get_value().items()}
+                print(f"Intermediate metrics: {interm_metrics}\n\n", flush=True)
 
     print(f"Total invalid: {total_invalid}")
     metrics = {k: round(v, 3) for k, v in metrics.get_value().items()}
@@ -201,6 +210,8 @@ if __name__ == '__main__':
         args = parser.parse_args([arg_filename_with_prefix])
     else:
         args = parser.parse_args()
+
+    print(args)
 
     # args = parser.parse_args()
     args.gpu = int(args.gpu) if args.gpu is not None else 0

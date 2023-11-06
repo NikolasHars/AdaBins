@@ -24,6 +24,16 @@ def preprocessing_transforms(mode):
         ToTensor(mode=mode)
     ])
 
+def downsample_sparse(depth, size):
+    indices = np.nonzero(depth[...])
+
+    new_indices = np.floor(indices[0] * size[0] / depth.shape[0]).astype(np.uint32), np.floor(indices[1] * size[1] / depth.shape[1]).astype(np.uint32)
+
+    new_depth = np.zeros(size)
+    new_depth[new_indices] = depth[indices]
+
+    return new_depth
+
 
 class DepthDataLoader(object):
     def __init__(self, args, mode):
@@ -135,7 +145,13 @@ class DataLoadPreprocess(Dataset):
                 data_path = self.args.data_path
 
             image_path = os.path.join(data_path, remove_leading_slash(sample_path.split()[0]))
-            image = np.asarray(Image.open(image_path), dtype=np.float32) / 255.0
+            
+            if self.args.dataset == 'waymo':
+                image = Image.open(image_path)
+                image = image.resize([564, 376], Image.Resampling.LANCZOS)
+                image = np.asarray(image, dtype=np.float32) / 255.0
+            else:
+                image = np.asarray(Image.open(image_path), dtype=np.float32) / 255.0
 
             if self.mode == 'online_eval':
                 gt_path = self.args.gt_path_eval
@@ -143,18 +159,31 @@ class DataLoadPreprocess(Dataset):
                 has_valid_depth = False
                 try:
                     depth_gt = Image.open(depth_path)
-                    has_valid_depth = True
+                    depth_gt = np.asarray(depth_gt, dtype=np.float32)
+                    has_valid_depth = depth_gt.mean() > 1e-10
+
+                    if not has_valid_depth:
+                        print('Empty gt for {}'.format(image_path))
                 except IOError:
                     depth_gt = False
-                    # print('Missing gt for {}'.format(image_path))
+                    print('Missing gt for {}'.format(image_path))
+                    
 
                 if has_valid_depth:
                     depth_gt = np.asarray(depth_gt, dtype=np.float32)
+
+                    if self.args.dataset == 'waymo':  
+                        depth_gt = downsample_sparse(depth_gt, [376, 564])
+
                     depth_gt = np.expand_dims(depth_gt, axis=2)
                     if self.args.dataset == 'nyu':
                         depth_gt = depth_gt / 1000.0
+                    elif self.args.dataset == 'waymo':
+                        depth_gt = depth_gt / 255.0
                     else:
                         depth_gt = depth_gt / 256.0
+
+
 
             if self.args.do_kb_crop is True:
                 height = image.shape[0]
